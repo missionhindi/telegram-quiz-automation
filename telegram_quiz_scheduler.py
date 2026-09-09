@@ -107,8 +107,12 @@ def send_poll(token, chat_id, question, options, correct_index, explanation):
 
 
 def send_daily_batch(config, questions, state):
-    token = config["bot_token"]
-    chat_id = config["chat_id"]
+    token = os.environ.get("BOT_TOKEN") or config.get("bot_token")
+    chat_id = os.environ.get("CHAT_ID") or config.get("chat_id")
+    if not token:
+        raise RuntimeError("BOT_TOKEN नहीं मिला।")
+    if not chat_id:
+        raise RuntimeError("CHAT_ID नहीं मिला।")
     batch_no = state["batch_no"] + 1
 
     remaining = len(questions) - state["next_index"]
@@ -173,10 +177,6 @@ def seconds_until_9pm():
 
 def main():
     config = load_json(CONFIG_FILE, {})
-    if not config.get("bot_token"):
-        raise RuntimeError("config.json में bot_token भरें।")
-    if not config.get("chat_id"):
-        raise RuntimeError("config.json में chat_id भरें।")
 
     questions = load_questions()
     state = load_json(
