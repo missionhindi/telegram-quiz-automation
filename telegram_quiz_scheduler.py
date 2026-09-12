@@ -5,11 +5,15 @@ import time
 import datetime as dt
 from pathlib import Path
 from zoneinfo import ZoneInfo
-
 import requests
 
 
+# =========================================================
+# TELEGRAM QUIZ SCHEDULER
+# =========================================================
+
 BASE_DIR = Path(__file__).resolve().parent
+
 CONFIG_FILE = BASE_DIR / "config.json"
 CSV_FILE = BASE_DIR / "sangya_70_questions.csv"
 STATE_FILE = BASE_DIR / "progress.json"
@@ -18,6 +22,10 @@ IST = ZoneInfo("Asia/Kolkata")
 
 TELEGRAM_TIMEOUT = (5, 10)
 
+
+# =========================================================
+# JSON FUNCTIONS
+# =========================================================
 
 def load_json(path, default):
     if not path.exists():
@@ -31,23 +39,42 @@ def save_json(path, data):
     tmp = path.with_suffix(".tmp")
 
     with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
 
     tmp.replace(path)
 
 
+# =========================================================
+# LOAD QUESTIONS
+# =========================================================
+
 def load_questions():
+
     questions = []
 
     if not CSV_FILE.exists():
-        raise RuntimeError(f"CSV file नहीं मिली: {CSV_FILE}")
+        raise RuntimeError(
+            f"CSV file नहीं मिली: {CSV_FILE}"
+        )
 
-    with CSV_FILE.open("r", encoding="utf-8-sig", newline="") as f:
+    with CSV_FILE.open(
+        "r",
+        encoding="utf-8-sig",
+        newline=""
+    ) as f:
+
         for row in csv.DictReader(f):
             questions.append(row)
 
     if not questions:
-        raise RuntimeError("CSV में कोई question नहीं मिला।")
+        raise RuntimeError(
+            "CSV में कोई question नहीं मिला।"
+        )
 
     required_columns = {
         "No",
@@ -57,60 +84,80 @@ def load_questions():
         "Option 3",
         "Option 4",
         "Correct",
-        "Explanation",
+        "Explanation"
     }
 
     missing = required_columns - set(questions[0].keys())
 
     if missing:
         raise RuntimeError(
-            f"CSV में ये columns missing हैं: {', '.join(sorted(missing))}"
+            "CSV में ये columns missing हैं: "
+            + ", ".join(sorted(missing))
         )
 
     for q in questions:
+
         if q["Correct"] not in {"1", "2", "3", "4"}:
             raise ValueError(
-                f"Q{q['No']}: Correct answer 1, 2, 3 या 4 होना चाहिए।"
-            )
-
-        if len(q["Question"]) > 300:
-            raise ValueError(
-                f"Q{q['No']} का question 300 characters से बड़ा है।"
+                f"Q{q['No']}: Correct answer "
+                "1, 2, 3 या 4 होना चाहिए।"
             )
 
     return questions
 
 
+# =========================================================
+# EXPLANATION COMPACTER
+# =========================================================
+
 def compact_explanation(text, max_chars=200):
-    text = " ".join(text.split())
+
+    if not text:
+        return ""
+
+    text = " ".join(str(text).split())
 
     if len(text) <= max_chars:
         return text
 
     sentences = []
+
     current = ""
 
     for part in text.replace("।", "।|").split("|"):
+
         part = part.strip()
 
         if not part:
             continue
 
-        candidate = (current + " " + part).strip()
+        candidate = (
+            current + " " + part
+        ).strip()
 
         if len(candidate) <= max_chars:
+
             current = candidate
             sentences.append(part)
+
         else:
             break
 
     if current:
         return current
 
-    return text[: max_chars - 1].rstrip() + "…"
+    return (
+        text[:max_chars - 1].rstrip()
+        + "…"
+    )
 
+
+# =========================================================
+# DAILY BATCH SIZE
+# =========================================================
 
 def get_batch_size(remaining):
+
     if remaining >= 20:
         return 20
 
@@ -126,56 +173,99 @@ def get_batch_size(remaining):
     return remaining
 
 
-def telegram_request(token, method, payload=None):
-    url = f"https://api.telegram.org/bot{token}/{method}"
+# =========================================================
+# TELEGRAM API REQUEST
+# =========================================================
+
+def telegram_request(
+    token,
+    method,
+    payload=None
+):
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{token}/{method}"
+    )
 
     try:
+
         response = requests.post(
             url,
             data=payload or {},
-            timeout=TELEGRAM_TIMEOUT,
+            timeout=TELEGRAM_TIMEOUT
         )
 
     except requests.Timeout as e:
+
         raise RuntimeError(
             f"Telegram API timeout: {method}"
         ) from e
 
     except requests.RequestException as e:
+
         raise RuntimeError(
             f"Telegram API connection error: {e}"
         ) from e
 
     try:
+
         data = response.json()
 
     except ValueError as e:
+
         raise RuntimeError(
-            f"Telegram API ने valid JSON नहीं दिया। HTTP {response.status_code}"
+            "Telegram API ने valid JSON नहीं दिया। "
+            f"HTTP {response.status_code}"
         ) from e
 
     if not data.get("ok"):
+
         raise RuntimeError(
-            f"Telegram API error: {data.get('description', data)}"
+            "Telegram API error: "
+            + str(
+                data.get(
+                    "description",
+                    data
+                )
+            )
         )
 
     return data
 
 
+# =========================================================
+# CHECK BOT
+# =========================================================
+
 def check_bot(token):
-    print("Telegram bot connection check...")
+
+    print(
+        "Telegram bot connection check..."
+    )
 
     data = telegram_request(
         token,
-        "getMe",
+        "getMe"
     )
 
-    username = data["result"].get("username", "unknown")
+    username = (
+        data["result"].get(
+            "username",
+            "unknown"
+        )
+    )
 
-    print(f"Telegram bot connected: @{username}")
+    print(
+        f"Telegram bot connected: @{username}"
+    )
 
     return True
 
+
+# =========================================================
+# SEND POLL
+# =========================================================
 
 def send_poll(
     token,
@@ -183,98 +273,280 @@ def send_poll(
     question,
     options,
     correct_index,
-    explanation,
+    explanation
 ):
+
     payload = {
+
         "chat_id": chat_id,
+
         "question": question,
+
         "options": json.dumps(
-            [{"text": x} for x in options],
-            ensure_ascii=False,
+            [
+                {"text": x}
+                for x in options
+            ],
+            ensure_ascii=False
         ),
+
         "is_anonymous": True,
+
         "type": "quiz",
+
         "allows_multiple_answers": False,
+
         "correct_option_id": correct_index,
-        "explanation": compact_explanation(explanation),
+
+        "explanation": compact_explanation(
+            explanation
+        ),
+
         "protect_content": False,
     }
 
     telegram_request(
         token,
         "sendPoll",
-        payload,
+        payload
     )
 
 
-def send_daily_batch(config, questions, state):
-    token = os.environ.get("BOT_TOKEN") or config.get("bot_token")
-    chat_id = os.environ.get("CHAT_ID") or config.get("chat_id")
+# =========================================================
+# CHECK WHETHER QUESTION CAN BE SENT
+# =========================================================
+
+def validate_question(q):
+
+    question_text = str(
+        q["Question"]
+    ).strip()
+
+    options = [
+        str(q["Option 1"]).strip(),
+        str(q["Option 2"]).strip(),
+        str(q["Option 3"]).strip(),
+        str(q["Option 4"]).strip(),
+    ]
+
+    # -----------------------------------------------------
+    # Telegram question limit
+    # -----------------------------------------------------
+
+    if len(question_text) > 300:
+
+        return False, (
+            "question 300 characters से ज्यादा है"
+        )
+
+    # -----------------------------------------------------
+    # Telegram option limit
+    # IMPORTANT:
+    # (1) / (2) / (3) / (4) भी option text में जाते हैं
+    # -----------------------------------------------------
+
+    rendered_options = [
+
+        f"(1) {options[0]}",
+        f"(2) {options[1]}",
+        f"(3) {options[2]}",
+        f"(4) {options[3]}",
+    ]
+
+    for index, option in enumerate(
+        rendered_options,
+        start=1
+    ):
+
+        if len(option) > 100:
+
+            return False, (
+                f"option {index} "
+                "100 characters से ज्यादा है"
+            )
+
+    return True, ""
+
+
+# =========================================================
+# SEND DAILY BATCH
+# =========================================================
+
+def send_daily_batch(
+    config,
+    questions,
+    state
+):
+
+    token = (
+        os.environ.get("BOT_TOKEN")
+        or config.get("bot_token")
+    )
+
+    chat_id = (
+        os.environ.get("CHAT_ID")
+        or config.get("chat_id")
+    )
 
     if not token:
+
         raise RuntimeError(
-            "BOT_TOKEN नहीं मिला। GitHub Settings → Secrets and variables "
+            "BOT_TOKEN नहीं मिला। "
+            "GitHub Settings → Secrets and variables "
             "→ Actions में BOT_TOKEN secret check करें।"
         )
 
     if not chat_id:
+
         raise RuntimeError(
-            "CHAT_ID नहीं मिला। GitHub Settings → Secrets and variables "
+            "CHAT_ID नहीं मिला। "
+            "GitHub Settings → Secrets and variables "
             "→ Actions में CHAT_ID secret check करें।"
         )
 
     check_bot(token)
 
-    print(f"CHAT_ID configured: {str(chat_id)[:3]}***")
-
-    remaining = len(questions) - state["next_index"]
-
-    if remaining <= 0:
-        print("सभी questions complete हो चुके हैं।")
-        return
-
-    batch_no = state["batch_no"] + 1
-
-    batch_size = get_batch_size(remaining)
+    print(
+        f"CHAT_ID configured: "
+        f"{str(chat_id)[:3]}***"
+    )
 
     start = state["next_index"]
-    end = start + batch_size
 
-    batch = questions[start:end]
+    remaining = (
+        len(questions) - start
+    )
+
+    if remaining <= 0:
+
+        print(
+            "सभी questions complete हो चुके हैं।"
+        )
+
+        return
+
+    batch_no = (
+        state["batch_no"] + 1
+    )
+
+    target_count = get_batch_size(
+        remaining
+    )
+
+    print(
+        "================================"
+    )
 
     print(
         f"Batch {batch_no}: "
-        f"{len(batch)} questions भेजे जा रहे हैं..."
+        f"{target_count} valid questions भेजे जाएंगे..."
     )
 
-    for i, q in enumerate(batch, start=1):
+    print(
+        "================================"
+    )
 
-        total_in_batch = len(batch)
+    sent_count = 0
+
+    skipped_count = 0
+
+    i = start
+
+    # -----------------------------------------------------
+    # आगे चलते रहेंगे जब तक target valid questions
+    # पूरे नहीं हो जाते
+    # -----------------------------------------------------
+
+    while (
+        i < len(questions)
+        and sent_count < target_count
+    ):
+
+        q = questions[i]
+
+        valid, reason = validate_question(q)
+
+        # -------------------------------------------------
+        # LONG / INVALID QUESTION SKIP
+        # -------------------------------------------------
+
+        if not valid:
+
+            print(
+                f"⏭️ Skipping Q{q['No']} - {reason}"
+            )
+
+            skipped_count += 1
+
+            # Skip को permanently record करें
+            if q["No"] not in state.get(
+                "skipped_questions",
+                []
+            ):
+
+                state.setdefault(
+                    "skipped_questions",
+                    []
+                ).append(q["No"])
+
+            i += 1
+
+            # Progress तुरंत save
+            state["next_index"] = i
+
+            save_json(
+                STATE_FILE,
+                state
+            )
+
+            continue
+
+        # -------------------------------------------------
+        # QUESTION FORMAT
+        # केवल Q. रहेगा
+        # [1/20] नहीं
+        # -------------------------------------------------
 
         poll_question = (
-            f"Q. [{i}/{total_in_batch}] {q['Question']}"
+            f"Q. {q['Question']}"
         )
 
         options = [
+
             f"(1) {q['Option 1']}",
+
             f"(2) {q['Option 2']}",
+
             f"(3) {q['Option 3']}",
+
             f"(4) {q['Option 4']}",
         ]
 
-        correct_index = int(q["Correct"]) - 1
+        correct_index = (
+            int(q["Correct"]) - 1
+        )
 
         print(
             f"Sending Q{q['No']} "
-            f"[{i}/{total_in_batch}]..."
+            f"[{sent_count + 1}/{target_count}]..."
         )
 
+        # -------------------------------------------------
+        # SEND
+        # -------------------------------------------------
+
         send_poll(
+
             token=token,
+
             chat_id=chat_id,
+
             question=poll_question,
+
             options=options,
+
             correct_index=correct_index,
+
             explanation=q["Explanation"],
         )
 
@@ -282,127 +554,268 @@ def send_daily_batch(config, questions, state):
             f"  ✓ Q{q['No']} sent"
         )
 
-        # Telegram को लगातार requests से overload न करें।
+        sent_count += 1
+
+        i += 1
+
+        # -------------------------------------------------
+        # VERY IMPORTANT:
+        # हर successful question के बाद progress save
+        # -------------------------------------------------
+
+        state["next_index"] = i
+
+        state["batch_no"] = batch_no
+
+        state["last_sent_at"] = (
+            dt.datetime.now(
+                IST
+            ).isoformat()
+        )
+
+        save_json(
+            STATE_FILE,
+            state
+        )
+
         time.sleep(0.5)
 
-    state["next_index"] = end
-    state["batch_no"] = batch_no
-    state["last_sent_at"] = dt.datetime.now(IST).isoformat()
+    # =====================================================
+    # FINAL LEFTOVER LOGIC
+    # =====================================================
 
-    skipped = len(questions) - state["next_index"]
-
-    if skipped and skipped < 5:
-        state["skipped_questions"] = list(
-            range(
-                state["next_index"] + 1,
-                len(questions) + 1,
-            )
-        )
-
-        state["next_index"] = len(questions)
-
-        print(
-            f"अंत में {skipped} leftover questions skip किए गए।"
-        )
-
-    save_json(
-        STATE_FILE,
-        state,
+    remaining_after = (
+        len(questions)
+        - state["next_index"]
     )
 
-    print("================================")
-    print("BATCH COMPLETE")
-    print(f"Questions sent: {len(batch)}")
-    print(f"Next question index: {state['next_index']}")
-    print("Progress saved.")
-    print("================================")
+    if (
+        remaining_after > 0
+        and remaining_after < 5
+    ):
 
+        leftover_questions = questions[
+            state["next_index"] :
+        ]
+
+        for q in leftover_questions:
+
+            if q["No"] not in state.get(
+                "skipped_questions",
+                []
+            ):
+
+                state.setdefault(
+                    "skipped_questions",
+                    []
+                ).append(q["No"])
+
+        print(
+            f"अंत में {remaining_after} "
+            "leftover questions skip किए गए।"
+        )
+
+        state["next_index"] = (
+            len(questions)
+        )
+
+        save_json(
+            STATE_FILE,
+            state
+        )
+
+    # =====================================================
+    # BATCH COMPLETE
+    # =====================================================
+
+    print(
+        "================================"
+    )
+
+    print(
+        "BATCH COMPLETE"
+    )
+
+    print(
+        f"Questions sent: {sent_count}"
+    )
+
+    print(
+        f"Questions skipped: {skipped_count}"
+    )
+
+    print(
+        f"Next question index: "
+        f"{state['next_index']}"
+    )
+
+    print(
+        "Progress saved."
+    )
+
+    print(
+        "================================"
+    )
+
+
+# =========================================================
+# TIME UNTIL 9 PM
+# =========================================================
 
 def seconds_until_9pm():
+
     now = dt.datetime.now(IST)
 
     target = now.replace(
+
         hour=21,
+
         minute=0,
+
         second=0,
-        microsecond=0,
+
+        microsecond=0
     )
 
     if now >= target:
-        target += dt.timedelta(days=1)
+
+        target += dt.timedelta(
+            days=1
+        )
 
     return max(
         0,
-        int((target - now).total_seconds()),
+        int(
+            (
+                target - now
+            ).total_seconds()
+        )
     )
 
 
+# =========================================================
+# MAIN
+# =========================================================
+
 def main():
-    print("================================")
-    print("Telegram Quiz Scheduler")
-    print("================================")
+
+    print(
+        "Telegram Quiz Scheduler"
+    )
 
     config = load_json(
         CONFIG_FILE,
-        {},
+        {}
     )
 
     questions = load_questions()
 
     state = load_json(
+
         STATE_FILE,
+
         {
             "next_index": 0,
+
             "batch_no": 0,
+
             "last_sent_at": None,
-            "skipped_questions": [],
-        },
+
+            "skipped_questions": []
+        }
     )
 
-    print(f"Total questions: {len(questions)}")
-    print(f"Current question index: {state['next_index']}")
-    print(f"Completed batches: {state['batch_no']}")
+    print(
+        f"Total questions: "
+        f"{len(questions)}"
+    )
 
-    # GitHub Actions में केवल एक batch भेजना है।
-    # यहाँ 24 घंटे wait नहीं करना है।
-    if os.environ.get("GITHUB_ACTIONS") == "true":
+    print(
+        f"Current question index: "
+        f"{state['next_index']}"
+    )
 
-        print("Running inside GitHub Actions.")
+    print(
+        f"Completed batches: "
+        f"{state['batch_no']}"
+    )
 
-        if state["next_index"] >= len(questions):
-            print("सभी questions post हो चुके हैं।")
+    # =====================================================
+    # GITHUB ACTIONS
+    # =====================================================
+
+    if os.environ.get(
+        "GITHUB_ACTIONS"
+    ) == "true":
+
+        print(
+            "Running inside GitHub Actions."
+        )
+
+        if (
+            state["next_index"]
+            >= len(questions)
+        ):
+
+            print(
+                "सभी questions post हो चुके हैं।"
+            )
+
             return
 
         send_daily_batch(
             config,
             questions,
-            state,
+            state
         )
 
         return
 
-    # Local PC scheduler
-    print("Daily schedule: 9:00 PM IST")
+    # =====================================================
+    # LOCAL PC MODE
+    # =====================================================
 
-    if config.get("run_now", False):
+    print(
+        "Daily schedule: 9:00 PM IST"
+    )
 
-        print("RUN_NOW enabled.")
+    # -----------------------------------------------------
+    # RUN_NOW
+    # -----------------------------------------------------
+
+    if config.get(
+        "run_now",
+        False
+    ):
+
+        print(
+            "RUN_NOW enabled."
+        )
 
         send_daily_batch(
             config,
             questions,
-            state,
+            state
         )
 
         return
 
+    # -----------------------------------------------------
+    # NORMAL 9 PM LOOP
+    # -----------------------------------------------------
+
     while True:
 
-        if state["next_index"] >= len(questions):
+        if (
+            state["next_index"]
+            >= len(questions)
+        ):
+
             print(
                 "सभी questions post हो चुके हैं। "
                 "Program बंद हो रहा है।"
             )
+
             break
 
         wait = seconds_until_9pm()
@@ -415,25 +828,42 @@ def main():
 
         time.sleep(wait)
 
-        if state["next_index"] < len(questions):
+        if (
+            state["next_index"]
+            < len(questions)
+        ):
 
             send_daily_batch(
                 config,
                 questions,
-                state,
+                state
             )
 
 
+# =========================================================
+# PROGRAM START
+# =========================================================
+
 if __name__ == "__main__":
+
     try:
+
         main()
 
     except KeyboardInterrupt:
-        print("\nProgram stopped.")
+
+        print(
+            "\nProgram stopped."
+        )
 
     except Exception as e:
-        print("\n================================")
-        print("ERROR")
-        print("================================")
-        print(str(e))
+
+        print(
+            "ERROR"
+        )
+
+        print(
+            str(e)
+        )
+
         raise
