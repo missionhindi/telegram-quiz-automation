@@ -14,11 +14,17 @@ STATE_FILE = BASE_DIR / "progress.json"
 IST = ZoneInfo("Asia/Kolkata")
 TELEGRAM_TIMEOUT = (5, 10)
 
+# Telegram flood-control protection
+NORMAL_DELAY_SECONDS = 3.0
+MAX_RATE_LIMIT_RETRIES = 6
+
+
 def load_json(path, default):
     if not path.exists():
         return default
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
+
 
 def save_json(path, data):
     tmp = path.with_suffix(".tmp")
@@ -26,29 +32,44 @@ def save_json(path, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
     tmp.replace(path)
 
+
 def load_questions():
     questions = []
     if not CSV_FILE.exists():
         raise RuntimeError(f"CSV file नहीं मिली: {CSV_FILE}")
+
     with CSV_FILE.open("r", encoding="utf-8-sig", newline="") as f:
         for row in csv.DictReader(f):
             questions.append(row)
+
     if not questions:
         raise RuntimeError("CSV में कोई question नहीं मिला।")
-    required = {"No","Question","Option 1","Option 2","Option 3","Option 4","Correct","Explanation"}
+
+    required = {
+        "No", "Question", "Option 1", "Option 2",
+        "Option 3", "Option 4", "Correct", "Explanation"
+    }
     missing = required - set(questions[0].keys())
     if missing:
-        raise RuntimeError("CSV में columns missing हैं: " + ", ".join(sorted(missing)))
+        raise RuntimeError(
+            "CSV में columns missing हैं: "
+            + ", ".join(sorted(missing))
+        )
+
     for q in questions:
-        if q["Correct"] not in {"1","2","3","4"}:
-            raise ValueError(f"Q{q['No']}: Correct answer 1-4 होना चाहिए।")
+        if q["Correct"] not in {"1", "2", "3", "4"}:
+            raise ValueError(
+                f"Q{q['No']}: Correct answer 1-4 होना चाहिए।"
+            )
+
     return questions
+
 
 def compact_explanation(text, max_chars=200):
     text = " ".join(str(text or "").split())
     if len(text) <= max_chars:
         return text
-    parts = []
+
     current = ""
     for part in text.replace("।", "।|").split("|"):
         part = part.strip()
@@ -57,33 +78,79 @@ def compact_explanation(text, max_chars=200):
         candidate = (current + " " + part).strip()
         if len(candidate) <= max_chars:
             current = candidate
-            parts.append(part)
         else:
             break
+
     if current:
         return current
-    return text[:max_chars-1].rstrip() + "…"
+    return text[:max_chars - 1].rstrip() + "…"
+
 
 def telegram_request(token, method, payload=None):
     url = f"https://api.telegram.org/bot{token}/{method}"
-    try:
-        response = requests.post(url, data=payload or {}, timeout=TELEGRAM_TIMEOUT)
-    except requests.Timeout as e:
-        raise RuntimeError(f"Telegram API timeout: {method}") from e
-    except requests.RequestException as e:
-        raise RuntimeError(f"Telegram API connection error: {e}") from e
-    try:
-        data = response.json()
-    except ValueError as e:
-        raise RuntimeError(f"Telegram API ने valid JSON नहीं दिया। HTTP {response.status_code}") from e
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegram API error: {data.get('description', data)}")
-    return data
+
+    for attempt in range(1, MAX_RATE_LIMIT_RETRIES + 1):
+        try:
+            response = requests.post(
+                url,
+                data=payload or {},
+                timeout=TELEGRAM_TIMEOUT,
+            )
+        except requests.Timeout as e:
+            raise RuntimeError(
+                f"Telegram API timeout: {method}"
+            ) from e
+        except requests.RequestException as e:
+            raise RuntimeError(
+                f"Telegram API connection error: {e}"
+            ) from e
+
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise RuntimeError(
+                "Telegram API ने valid JSON नहीं दिया। "
+                f"HTTP {response.status_code}"
+            ) from e
+
+        if data.get("ok"):
+            return data
+
+        description = str(data.get("description", data))
+
+        # Telegram flood control / rate limit
+        if response.status_code == 429 or "Too Many Requests" in description:
+            retry_after = 10
+            parameters = data.get("parameters") or {}
+            try:
+                retry_after = int(parameters.get("retry_after", retry_after))
+            except (TypeError, ValueError):
+                pass
+
+            wait_seconds = retry_after + 1
+            print(
+                f"⚠️ Telegram rate limit: retry after {retry_after}s. "
+                f"{wait_seconds}s wait करके फिर कोशिश करेंगे "
+                f"({attempt}/{MAX_RATE_LIMIT_RETRIES})..."
+            )
+            time.sleep(wait_seconds)
+            continue
+
+        raise RuntimeError(
+            f"Telegram API error: {description}"
+        )
+
+    raise RuntimeError(
+        "Telegram rate limit बार-बार आ रहा है; "
+        "इस run को रोक दिया गया। अगली run saved progress से continue करेगी।"
+    )
+
 
 def check_bot(token):
     data = telegram_request(token, "getMe")
     username = data["result"].get("username", "unknown")
     print(f"Telegram bot connected: @{username}")
+
 
 def validate_question(q):
     question = str(q["Question"]).strip()
@@ -93,19 +160,26 @@ def validate_question(q):
         f"(3) {str(q['Option 3']).strip()}",
         f"(4) {str(q['Option 4']).strip()}",
     ]
+
     # Telegram limits: question <= 300, each poll option <= 100.
     if len(question) > 300:
         return False, f"question {len(question)} chars है (limit 300)"
+
     for i, option in enumerate(rendered_options, 1):
         if len(option) > 100:
             return False, f"option {i} {len(option)} chars है (limit 100)"
+
     return True, ""
+
 
 def send_poll(token, chat_id, question, options, correct_index, explanation):
     payload = {
         "chat_id": chat_id,
         "question": question,
-        "options": json.dumps([{"text": x} for x in options], ensure_ascii=False),
+        "options": json.dumps(
+            [{"text": x} for x in options],
+            ensure_ascii=False,
+        ),
         "is_anonymous": True,
         "type": "quiz",
         "allows_multiple_answers": False,
@@ -115,9 +189,11 @@ def send_poll(token, chat_id, question, options, correct_index, explanation):
     }
     telegram_request(token, "sendPoll", payload)
 
+
 def send_all_questions(config, questions, state):
     token = os.environ.get("BOT_TOKEN") or config.get("bot_token")
     chat_id = os.environ.get("CHAT_ID") or config.get("chat_id")
+
     if not token:
         raise RuntimeError("BOT_TOKEN नहीं मिला।")
     if not chat_id:
@@ -156,6 +232,7 @@ def send_all_questions(config, questions, state):
         correct_index = int(q["Correct"]) - 1
 
         print(f"Sending Q{q['No']} ...")
+
         send_poll(
             token=token,
             chat_id=chat_id,
@@ -164,6 +241,7 @@ def send_all_questions(config, questions, state):
             correct_index=correct_index,
             explanation=q["Explanation"],
         )
+
         print(f"  ✓ Q{q['No']} sent")
 
         sent += 1
@@ -173,7 +251,9 @@ def send_all_questions(config, questions, state):
         state["next_index"] = i
         state["last_sent_at"] = dt.datetime.now(IST).isoformat()
         save_json(STATE_FILE, state)
-        time.sleep(0.5)
+
+        # Deliberately slow down between polls to reduce Telegram flood limits.
+        time.sleep(NORMAL_DELAY_SECONDS)
 
     state["batch_no"] = state.get("batch_no", 0) + 1
     save_json(STATE_FILE, state)
@@ -186,6 +266,7 @@ def send_all_questions(config, questions, state):
     print("Progress saved.")
     print("================================")
 
+
 def seconds_until_9pm():
     now = dt.datetime.now(IST)
     target = now.replace(hour=21, minute=0, second=0, microsecond=0)
@@ -193,13 +274,19 @@ def seconds_until_9pm():
         target += dt.timedelta(days=1)
     return max(0, int((target - now).total_seconds()))
 
+
 def main():
     print("Telegram Quiz Scheduler - सर्वनाम")
     config = load_json(CONFIG_FILE, {})
     questions = load_questions()
     state = load_json(
         STATE_FILE,
-        {"next_index": 0, "batch_no": 0, "last_sent_at": None, "skipped_questions": []}
+        {
+            "next_index": 0,
+            "batch_no": 0,
+            "last_sent_at": None,
+            "skipped_questions": [],
+        },
     )
 
     if os.environ.get("GITHUB_ACTIONS") == "true":
@@ -223,6 +310,7 @@ def main():
         print(f"Next run in {wait // 3600}h {(wait % 3600) // 60}m.")
         time.sleep(wait)
         send_all_questions(config, questions, state)
+
 
 if __name__ == "__main__":
     try:
