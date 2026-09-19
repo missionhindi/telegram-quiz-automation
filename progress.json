@@ -1,6 +1,12 @@
 {
-  "next_index": 0,
-  "batch_no": 0,
-  "last_sent_at": null,
-  "skipped_questions": []
+  "next_index": 59,
+  "batch_no": 1,
+  "last_sent_at": "2026-09-19T21:13:12.804988+05:30",
+  "skipped_questions": [
+    "1",
+    "6",
+    "11",
+    "14",
+    "27"
+  ]
 }
