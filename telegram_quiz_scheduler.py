@@ -8,15 +8,13 @@ from zoneinfo import ZoneInfo
 import requests
 
 BASE_DIR = Path(__file__).resolve().parent
-CSV_FILE = BASE_DIR / "visheshan_questions.csv"
+CSV_FILE = BASE_DIR / "kriya_questions.csv"
 STATE_FILE = BASE_DIR / "progress.json"
-CONFIG_FILE = BASE_DIR / "config.json"
-
 IST = ZoneInfo("Asia/Kolkata")
 
 TELEGRAM_TIMEOUT = (10, 30)
-DELAY_BETWEEN_POLLS = 3.0
-MAX_RETRIES = 12
+POLL_DELAY = 3.0
+MAX_RETRIES_429 = 8
 
 
 def load_json(path, default):
@@ -47,18 +45,35 @@ def load_questions():
         "No", "Question", "Option 1", "Option 2",
         "Option 3", "Option 4", "Correct", "Explanation"
     }
-
     missing = required - set(questions[0].keys())
     if missing:
         raise RuntimeError(
             "CSV में columns missing हैं: " + ", ".join(sorted(missing))
         )
 
-    for q in questions:
-        if q["Correct"] not in {"1", "2", "3", "4"}:
-            raise ValueError(f"Q{q['No']}: Correct answer invalid है।")
-
     return questions
+
+
+def compact_explanation(text, max_chars=200):
+    text = " ".join(str(text or "").split())
+    if len(text) <= max_chars:
+        return text
+
+    current = ""
+    for part in text.replace("।", "।|").split("|"):
+        part = part.strip()
+        if not part:
+            continue
+        candidate = (current + " " + part).strip()
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            break
+
+    if current:
+        return current
+
+    return text[:max_chars - 1].rstrip() + "…"
 
 
 def validate_question(q):
@@ -70,6 +85,7 @@ def validate_question(q):
         str(q["Option 4"]).strip(),
     ]
 
+    # Telegram sendPoll limits.
     if len(question) > 300:
         return False, "question 300 characters से ज्यादा है"
 
@@ -80,121 +96,61 @@ def validate_question(q):
         f"(4) {options[3]}",
     ]
 
-    for n, option in enumerate(rendered, start=1):
+    for i, option in enumerate(rendered, 1):
         if len(option) > 100:
-            return False, f"option {n} 100 characters से ज्यादा है"
+            return False, f"option {i} 100 characters से ज्यादा है"
 
-    explanation = str(q["Explanation"]).strip()
-    if len(explanation) > 200:
-        # Explanation को छोटा नहीं करेंगे; question valid रहेगा,
-        # लेकिन Telegram limit के लिए explanation को sentence boundary
-        # पर trim किया जाएगा।
-        return True, "explanation लंबा है"
+    if q["Correct"] not in {"1", "2", "3", "4"}:
+        return False, "correct answer 1-4 में नहीं है"
 
     return True, ""
 
 
-def telegram_request(token, method, payload=None):
+def telegram_request(token, method, payload):
     url = f"https://api.telegram.org/bot{token}/{method}"
 
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = requests.post(
-                url,
-                data=payload or {},
-                timeout=TELEGRAM_TIMEOUT,
-            )
-        except requests.Timeout:
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(f"Telegram API timeout: {method}")
-            wait = min(10 * attempt, 60)
-            print(f"Timeout. {wait}s बाद retry...")
-            time.sleep(wait)
-            continue
-        except requests.RequestException as e:
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(f"Telegram connection error: {e}")
-            wait = min(10 * attempt, 60)
-            print(f"Connection error. {wait}s बाद retry...")
-            time.sleep(wait)
-            continue
+    response = requests.post(
+        url,
+        data=payload,
+        timeout=TELEGRAM_TIMEOUT
+    )
 
-        try:
-            data = response.json()
-        except ValueError as e:
-            if attempt == MAX_RETRIES:
-                raise RuntimeError(
-                    f"Telegram API ने valid JSON नहीं दिया। HTTP {response.status_code}"
-                ) from e
-            time.sleep(min(10 * attempt, 60))
-            continue
+    try:
+        data = response.json()
+    except ValueError as e:
+        raise RuntimeError(
+            f"Telegram API ने valid JSON नहीं दिया। HTTP {response.status_code}"
+        ) from e
 
-        if data.get("ok"):
-            return data
-
-        description = str(data.get("description", data))
-
-        if response.status_code == 429 or "Too Many Requests" in description:
-            retry_after = 30
-            try:
-                retry_after = int(data.get("parameters", {}).get("retry_after", 30))
-            except (TypeError, ValueError):
-                pass
-
-            wait = max(retry_after + 2, 3)
-            print(
-                f"Telegram rate limit मिला. "
-                f"{wait} सेकंड wait करके उसी request को retry करेंगे..."
-            )
-            time.sleep(wait)
-            continue
-
-        raise RuntimeError(f"Telegram API error: {description}")
-
-    raise RuntimeError(f"Telegram API retry limit exceeded: {method}")
+    return data
 
 
-def compact_explanation(text, max_chars=200):
-    text = " ".join(str(text).split())
+def check_bot(token):
+    data = telegram_request(token, "getMe", {})
+    if not data.get("ok"):
+        raise RuntimeError(
+            "Telegram bot connection error: "
+            + str(data.get("description", data))
+        )
 
-    if len(text) <= max_chars:
-        return text
-
-    # Explanation को sentence boundary पर जितना संभव हो उतना रखें।
-    pieces = text.replace("।", "।|").split("|")
-    current = ""
-
-    for piece in pieces:
-        piece = piece.strip()
-        if not piece:
-            continue
-
-        candidate = (current + " " + piece).strip()
-        if len(candidate) <= max_chars:
-            current = candidate
-        else:
-            break
-
-    if current:
-        return current
-
-    return text[: max_chars - 1].rstrip() + "…"
+    username = data["result"].get("username", "unknown")
+    print(f"Telegram bot connected: @{username}")
 
 
-def send_poll(token, chat_id, q):
+def send_poll_with_retry(token, chat_id, q):
     options = [
-        f"(1) {q['Option 1'].strip()}",
-        f"(2) {q['Option 2'].strip()}",
-        f"(3) {q['Option 3'].strip()}",
-        f"(4) {q['Option 4'].strip()}",
+        f"(1) {q['Option 1']}",
+        f"(2) {q['Option 2']}",
+        f"(3) {q['Option 3']}",
+        f"(4) {q['Option 4']}",
     ]
 
     payload = {
         "chat_id": chat_id,
-        "question": f"Q. {q['Question'].strip()}",
+        "question": f"Q. {q['Question']}",
         "options": json.dumps(
             [{"text": x} for x in options],
-            ensure_ascii=False,
+            ensure_ascii=False
         ),
         "is_anonymous": True,
         "type": "quiz",
@@ -204,13 +160,46 @@ def send_poll(token, chat_id, q):
         "protect_content": False,
     }
 
-    telegram_request(token, "sendPoll", payload)
+    retry_count = 0
 
+    while True:
+        data = telegram_request(token, "sendPoll", payload)
 
-def check_bot(token):
-    data = telegram_request(token, "getMe")
-    username = data["result"].get("username", "unknown")
-    print(f"Telegram bot connected: @{username}")
+        if data.get("ok"):
+            return
+
+        description = str(data.get("description", ""))
+
+        # Telegram explicitly tells us how long to wait for 429.
+        if data.get("error_code") == 429:
+            retry_after = (
+                data.get("parameters", {}).get("retry_after")
+            )
+
+            if retry_after is None:
+                retry_after = 5
+
+            retry_count += 1
+
+            if retry_count > MAX_RETRIES_429:
+                raise RuntimeError(
+                    "Telegram rate-limit बार-बार आया; "
+                    "maximum automatic retries समाप्त हो गए।"
+                )
+
+            wait_seconds = int(retry_after) + 1
+
+            print(
+                f"⚠️ Telegram rate limit. "
+                f"{wait_seconds} sec wait करके उसी question को retry करेंगे..."
+            )
+
+            time.sleep(wait_seconds)
+            continue
+
+        raise RuntimeError(
+            f"Telegram API error: {description}"
+        )
 
 
 def send_all_questions(config, questions, state):
@@ -225,69 +214,70 @@ def send_all_questions(config, questions, state):
 
     check_bot(token)
 
-    if state["next_index"] >= len(questions):
-        print("सभी questions पहले ही post हो चुके हैं।")
-        return
+    total = len(questions)
+    i = int(state.get("next_index", 0))
 
-    skipped_this_run = 0
-    sent_this_run = 0
-    i = state["next_index"]
+    state["batch_no"] = int(state.get("batch_no", 0)) + 1
+    batch_no = state["batch_no"]
+    save_json(STATE_FILE, state)
 
-    print(f"Total questions in CSV: {len(questions)}")
+    print(f"Total questions in CSV: {total}")
     print(f"Starting from question index: {i}")
+    print(f"Run batch: {batch_no}")
 
-    while i < len(questions):
+    sent = 0
+    skipped = 0
+
+    while i < total:
         q = questions[i]
+
         valid, reason = validate_question(q)
 
         if not valid:
-            print(f"SKIP Q{q['No']} - {reason}")
+            print(f"⏭️ Q{q['No']} SKIPPED — {reason}")
 
+            state.setdefault("skipped_questions", [])
             if q["No"] not in state["skipped_questions"]:
                 state["skipped_questions"].append(q["No"])
 
-            skipped_this_run += 1
             i += 1
             state["next_index"] = i
+            state["last_sent_at"] = dt.datetime.now(IST).isoformat()
             save_json(STATE_FILE, state)
+
+            skipped += 1
             continue
 
-        print(f"Sending Q{q['No']} ...")
+        print(f"Sending Q{q['No']}...")
 
-        # 429 आने पर telegram_request खुद retry करेगा।
-        send_poll(token, chat_id, q)
+        # A 429 is handled internally with retry_after.
+        send_poll_with_retry(token, chat_id, q)
 
-        sent_this_run += 1
+        sent += 1
         i += 1
 
+        # Save immediately after every successful post.
         state["next_index"] = i
         state["last_sent_at"] = dt.datetime.now(IST).isoformat()
         save_json(STATE_FILE, state)
 
         print(f"✓ Q{q['No']} sent")
-        print(f"Progress: {i}/{len(questions)}")
+        print(f"Progress: {i}/{total}")
 
-        if i < len(questions):
-            time.sleep(DELAY_BETWEEN_POLLS)
-
-    state["batch_no"] += 1
-    state["next_index"] = len(questions)
-    save_json(STATE_FILE, state)
+        time.sleep(POLL_DELAY)
 
     print("================================")
     print("TOPIC COMPLETE")
-    print(f"Questions sent: {sent_this_run}")
-    print(f"Questions skipped: {skipped_this_run}")
-    print(f"Total skipped so far: {len(state['skipped_questions'])}")
-    print("All valid questions for this topic are complete.")
+    print(f"Questions sent: {sent}")
+    print(f"Questions skipped: {skipped}")
+    print(f"Next question index: {state['next_index']}")
     print("Progress saved.")
     print("================================")
 
 
 def main():
-    print("Telegram Quiz Scheduler - विशेषण")
-
-    config = load_json(CONFIG_FILE, {})
+    config_path = BASE_DIR / "config.json"
+    config = load_json(config_path, {})
 
     questions = load_questions()
 
@@ -297,19 +287,28 @@ def main():
             "next_index": 0,
             "batch_no": 0,
             "last_sent_at": None,
-            "skipped_questions": [],
-        },
+            "skipped_questions": []
+        }
     )
 
-    # GitHub Actions में एक run = पूरा topic।
-    send_all_questions(config, questions, state)
+    # GitHub Actions: send the entire topic in one run.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        send_all_questions(config, questions, state)
+        return
+
+    # Local/manual run.
+    if config.get("run_now", True):
+        send_all_questions(config, questions, state)
+        return
+
+    print("Local scheduler mode disabled; set run_now=true to run.")
 
 
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nProgram stopped.")
+        print("Program stopped.")
     except Exception as e:
         print("ERROR")
         print(str(e))
