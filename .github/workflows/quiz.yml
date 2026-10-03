@@ -9,6 +9,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: telegram-quiz-daily
+  cancel-in-progress: false
+
 jobs:
   send-quiz:
     runs-on: ubuntu-latest
@@ -25,16 +29,16 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run quiz
+      - name: Run Karak quiz
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python telegram_quiz_scheduler.py
+        run: python telegram_quiz_karak.py
 
-      - name: Save progress
+      - name: Save Karak progress
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add progress.json
-          git diff --cached --quiet || git commit -m "Update quiz progress"
+          git add progress_karak.json
+          git diff --cached --quiet || git commit -m "Update Karak quiz progress"
           git push
